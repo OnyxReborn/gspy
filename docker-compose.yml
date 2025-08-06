@@ -1,0 +1,266 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:6.0
+    container_name: gspy-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: gspy123456
+      MONGO_INITDB_DATABASE: gspy
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./docker/mongo/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    networks:
+      - gspy-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: gspy-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --requirepass gspy123456
+    networks:
+      - gspy-network
+
+  # Backend API Server
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gspy-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      MONGODB_URI: mongodb://admin:gspy123456@mongodb:27017/gspy?authSource=admin
+      REDIS_URL: redis://:gspy123456@redis:6379
+      JWT_SECRET: gspy-super-secret-jwt-key-2024
+      SESSION_SECRET: gspy-session-secret-2024
+      FRONTEND_URL: http://localhost:3000
+      EMAIL_SERVICE: gmail
+      EMAIL_USER: noreply@gspy.com
+      EMAIL_PASS: your-email-password
+      AWS_ACCESS_KEY_ID: your-aws-access-key
+      AWS_SECRET_ACCESS_KEY: your-aws-secret-key
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: gspy-storage
+      GOOGLE_CLOUD_PROJECT: gspy-project
+      GOOGLE_CLOUD_STORAGE_BUCKET: gspy-storage
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/logs:/app/logs
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - gspy-network
+
+  # Frontend Web Dashboard
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gspy-frontend
+    restart: unless-stopped
+    environment:
+      REACT_APP_API_URL: http://localhost:5000/api
+      REACT_APP_SOCKET_URL: http://localhost:5000
+      REACT_APP_ENVIRONMENT: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - gspy-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: gspy-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/ssl:/etc/nginx/ssl:ro
+      - ./docker/nginx/sites-enabled:/etc/nginx/sites-enabled:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - gspy-network
+
+  # phpMyAdmin (for database management)
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: gspy-phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mongodb
+      PMA_PORT: 27017
+      PMA_USER: admin
+      PMA_PASSWORD: gspy123456
+    ports:
+      - "8080:80"
+    depends_on:
+      - mongodb
+    networks:
+      - gspy-network
+
+  # Redis Commander (for Redis management)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: gspy-redis-commander
+    restart: unless-stopped
+    environment:
+      REDIS_HOSTS: local:redis:6379:0:gspy123456
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - gspy-network
+
+  # Elasticsearch (for advanced search and analytics)
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: gspy-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - gspy-network
+
+  # Kibana (for Elasticsearch visualization)
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: gspy-kibana
+    restart: unless-stopped
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - gspy-network
+
+  # Prometheus (for monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: gspy-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - gspy-network
+
+  # Grafana (for monitoring dashboards)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gspy-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: gspy123456
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    networks:
+      - gspy-network
+
+  # Mailhog (for email testing)
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: gspy-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - gspy-network
+
+  # MinIO (for file storage)
+  minio:
+    image: minio/minio:latest
+    container_name: gspy-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: gspyadmin
+      MINIO_ROOT_PASSWORD: gspy123456
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - gspy-network
+
+  # Traefik (for load balancing and SSL termination)
+  traefik:
+    image: traefik:v2.10
+    container_name: gspy-traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8082:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./docker/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - gspy-network
+
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  gspy-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 
