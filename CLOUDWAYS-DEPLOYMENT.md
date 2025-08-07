@@ -5,7 +5,7 @@ This guide will help you deploy gSpy to Cloudways hosting platform with full fea
 ## 🚀 **Cloudways Advantages**
 
 ### **✅ Full Feature Support:**
-- ✅ **MongoDB** (built-in support)
+- ✅ **MySQL** (built-in support)
 - ✅ **Redis** (built-in support)
 - ✅ **Node.js** (multiple versions available)
 - ✅ **PM2** (process management)
@@ -160,28 +160,45 @@ cp backend/env.example backend/.env
 
 ## 🗄️ **Database Configuration**
 
-### **MongoDB Setup (Recommended)**
+### **MySQL Setup (Recommended)**
 
-Cloudways provides MongoDB support:
+Cloudways provides excellent MySQL support:
 
 1. **Go to Application Settings**
 2. **Click "Database Manager"**
-3. **Create MongoDB database**
-4. **Get connection string**
+3. **Create new MySQL database**:
+   - **Database Name**: gspy_db
+   - **Username**: gspy_user
+   - **Password**: (use generated password)
+4. **Get connection details** from Cloudways panel
 5. **Update backend/.env**:
    ```env
-   MONGODB_URI=mongodb://username:password@localhost:27017/gspy
+   DB_HOST=localhost
+   DB_PORT=3306
+   DB_NAME=gspy_db
+   DB_USER=gspy_user
+   DB_PASSWORD=your_password
    ```
 
-### **MySQL Setup (Alternative)**
+### **Database Schema Setup**
 
-If you prefer MySQL:
+After creating the database, you'll need to set up the schema:
 
-1. **Create MySQL database** in Cloudways
-2. **Update backend** to use MySQL
-3. **Install MySQL dependencies**:
-   ```bash
-   npm install mysql2 sequelize
+```bash
+# Connect to MySQL and create tables
+mysql -u gspy_user -p gspy_db < backend/database/schema.sql
+```
+
+### **MongoDB Alternative (External)**
+
+If you prefer MongoDB, you can use MongoDB Atlas:
+
+1. **Create MongoDB Atlas account** at [mongodb.com](https://mongodb.com)
+2. **Create cluster** (free tier available)
+3. **Get connection string**
+4. **Update backend/.env**:
+   ```env
+   MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/gspy
    ```
 
 ## 📱 **Mobile App Configuration**
@@ -253,17 +270,17 @@ tar -czf backup_$(date +%Y%m%d).tar.gz applications/your-app-name/public_html
 ### **Database Management**
 
 ```bash
-# Backup MongoDB
-mongodump --db gspy --out backup/
-
-# Restore MongoDB
-mongorestore --db gspy backup/gspy/
-
 # Backup MySQL
-mysqldump -u username -p gspy_db > backup.sql
+mysqldump -u gspy_user -p gspy_db > backup.sql
 
 # Restore MySQL
-mysql -u username -p gspy_db < backup.sql
+mysql -u gspy_user -p gspy_db < backup.sql
+
+# Backup MongoDB (if using Atlas)
+mongodump --uri="mongodb+srv://username:password@cluster.mongodb.net/gspy" --out backup/
+
+# Restore MongoDB (if using Atlas)
+mongorestore --uri="mongodb+srv://username:password@cluster.mongodb.net/gspy" backup/gspy/
 ```
 
 ## 🔒 **Security Configuration**
@@ -474,11 +491,11 @@ pm2 logs --err
 
 #### **2. Database Connection Issues**
 ```bash
-# Test MongoDB connection
-mongo --host localhost --port 27017
-
 # Test MySQL connection
-mysql -u username -p -h localhost
+mysql -u gspy_user -p -h localhost
+
+# Test MongoDB connection (if using Atlas)
+mongo "mongodb+srv://cluster.mongodb.net/gspy" --username username
 ```
 
 #### **3. Domain Issues**

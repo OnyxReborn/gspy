@@ -108,6 +108,7 @@ setup_gspy() {
     print_status "Setting up gSpy application..."
     
     mkdir -p backend frontend mobile logs uploads backups
+    mkdir -p backend/database
     
     # Setup backend
     cd backend
@@ -124,7 +125,8 @@ setup_gspy() {
   },
   "dependencies": {
     "express": "^4.18.2",
-    "mongoose": "^8.0.3",
+    "mysql2": "^3.6.5",
+    "sequelize": "^6.35.1",
     "redis": "^4.6.10",
     "socket.io": "^4.7.4",
     "jsonwebtoken": "^9.0.2",
@@ -170,7 +172,7 @@ EOF
     # Create server.js
     cat > server.js << 'EOF'
 const express = require('express');
-const mongoose = require('mongoose');
+const { Sequelize } = require('sequelize');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
@@ -200,12 +202,27 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(limiter);
 
 // Database connection
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/gspy', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('Connected to MongoDB'))
-.catch((error) => console.error('MongoDB connection error:', error));
+const sequelize = new Sequelize(
+  process.env.DB_NAME || 'gspy_db',
+  process.env.DB_USER || 'gspy_user',
+  process.env.DB_PASSWORD || 'password',
+  {
+    host: process.env.DB_HOST || 'localhost',
+    port: process.env.DB_PORT || 3306,
+    dialect: 'mysql',
+    logging: false,
+    pool: {
+      max: 5,
+      min: 0,
+      acquire: 30000,
+      idle: 10000
+    }
+  }
+);
+
+sequelize.authenticate()
+  .then(() => console.log('Connected to MySQL database'))
+  .catch((error) => console.error('MySQL connection error:', error));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -242,7 +259,11 @@ EOF
 NODE_ENV=production
 PORT=5000
 HOST=0.0.0.0
-MONGODB_URI=mongodb://$DB_USER:$DB_PASS@localhost:27017/$DB_NAME?authSource=admin
+DB_HOST=localhost
+DB_PORT=3306
+DB_NAME=$DB_NAME
+DB_USER=$DB_USER
+DB_PASSWORD=$DB_PASS
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=$(openssl rand -base64 64 | tr -d "=+/")
 JWT_EXPIRES_IN=7d
@@ -286,6 +307,63 @@ ENCRYPTION_ALGORITHM=aes-256-gcm
 EOF
     
     npm install --production
+    
+    # Create database schema file
+    cat > database/schema.sql << 'EOF'
+-- gSpy MySQL Database Schema
+-- This file contains all the necessary tables for gSpy monitoring system
+
+-- Create database if not exists
+CREATE DATABASE IF NOT EXISTS gspy_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE gspy_db;
+
+-- Users table
+CREATE TABLE IF NOT EXISTS users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    firstName VARCHAR(100) NOT NULL,
+    lastName VARCHAR(100) NOT NULL,
+    phone VARCHAR(20),
+    role ENUM('user', 'admin', 'super_admin') DEFAULT 'user',
+    subscription_plan ENUM('basic', 'premium', 'enterprise') DEFAULT 'basic',
+    subscription_status ENUM('active', 'inactive', 'expired', 'cancelled') DEFAULT 'inactive',
+    subscription_start_date DATETIME,
+    subscription_end_date DATETIME,
+    subscription_auto_renew BOOLEAN DEFAULT FALSE,
+    notifications_email BOOLEAN DEFAULT TRUE,
+    notifications_push BOOLEAN DEFAULT TRUE,
+    notifications_sms BOOLEAN DEFAULT FALSE,
+    privacy_data_retention INT DEFAULT 90,
+    privacy_share_analytics BOOLEAN DEFAULT TRUE,
+    language VARCHAR(10) DEFAULT 'en',
+    timezone VARCHAR(50) DEFAULT 'UTC',
+    is_active BOOLEAN DEFAULT TRUE,
+    last_login DATETIME,
+    login_attempts INT DEFAULT 0,
+    lock_until DATETIME,
+    email_verified BOOLEAN DEFAULT FALSE,
+    email_verification_token VARCHAR(255),
+    email_verification_expires DATETIME,
+    password_reset_token VARCHAR(255),
+    password_reset_expires DATETIME,
+    two_factor_enabled BOOLEAN DEFAULT FALSE,
+    two_factor_secret VARCHAR(255),
+    api_key VARCHAR(255),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_email (email),
+    INDEX idx_role (role),
+    INDEX idx_subscription_status (subscription_status),
+    INDEX idx_is_active (is_active)
+);
+
+-- Insert default admin user (password: admin123)
+INSERT INTO users (email, password, firstName, lastName, role, subscription_plan, subscription_status, is_active, email_verified) 
+VALUES ('admin@gspy.com', '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj4J/HS.iK8i', 'Admin', 'User', 'super_admin', 'enterprise', 'active', TRUE, TRUE)
+ON DUPLICATE KEY UPDATE id=id;
+EOF
+    
     cd ..
     
     # Setup frontend
@@ -474,12 +552,19 @@ EOF
 
 setup_database() {
     print_status "Setting up database..."
+    
+    # Create database and user
     mysql -u root -p -e "
     CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     CREATE USER IF NOT EXISTS '$DB_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
     GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
     FLUSH PRIVILEGES;
     "
+    
+    # Create database schema
+    print_status "Creating database schema..."
+    mysql -u $DB_USER -p$DB_PASS $DB_NAME < backend/database/schema.sql
+    
     print_success "Database setup completed."
 }
 
