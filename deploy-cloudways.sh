@@ -3,6 +3,26 @@
 # gSpy Cloudways Deployment Script
 set -e
 
+# Error handling function
+cleanup_on_error() {
+    print_error "Deployment failed. Cleaning up..."
+    
+    # Stop PM2 processes if running
+    if command -v pm2 >/dev/null 2>&1; then
+        pm2 stop gspy-backend 2>/dev/null || true
+        pm2 delete gspy-backend 2>/dev/null || true
+    fi
+    
+    # Remove temporary files
+    rm -rf /tmp/gspy-* 2>/dev/null || true
+    
+    print_error "Cleanup completed. Please check the error messages above."
+    exit 1
+}
+
+# Set trap to call cleanup function on error
+trap cleanup_on_error ERR
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -36,25 +56,448 @@ get_input() {
     echo "${input:-$default}"
 }
 
+# Function to check if running on Cloudways
+check_cloudways_environment() {
+    print_status "Checking Cloudways environment..."
+    
+    # Check if we're in a Cloudways-like environment
+    if [ -d "/home/master/applications" ]; then
+        print_success "Detected Cloudways environment."
+        CLOUDWAYS_ENV=true
+    else
+        print_warning "Not running in Cloudways environment. Some features may not work correctly."
+        print_warning "This script is designed for Cloudways hosting."
+        CLOUDWAYS_ENV=false
+        
+        read -p "Continue anyway? (y/N): " continue_anyway
+        if [[ ! $continue_anyway =~ ^[Yy]$ ]]; then
+            print_error "Deployment cancelled."
+            exit 1
+        fi
+    fi
+    
+    # Check if we have sudo privileges
+    if ! sudo -n true 2>/dev/null; then
+        print_warning "Sudo privileges required for system package installation."
+        print_warning "Please ensure you have sudo access or run as root."
+        
+        read -p "Continue? (y/N): " continue_sudo
+        if [[ ! $continue_sudo =~ ^[Yy]$ ]]; then
+            print_error "Deployment cancelled."
+            exit 1
+        fi
+    fi
+}
+
 check_requirements() {
-    print_status "Checking system requirements..."
+    print_status "Checking and installing system requirements..."
     
+    # Check and install Node.js
     if ! command -v node >/dev/null 2>&1; then
-        print_error "Node.js is not available."
-        exit 1
+        print_status "Node.js not found. Installing Node.js..."
+        
+        # Detect OS and install Node.js
+        if command -v apt-get >/dev/null 2>&1; then
+            # Ubuntu/Debian
+            curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+        elif command -v yum >/dev/null 2>&1; then
+            # CentOS/RHEL
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+            sudo yum install -y nodejs
+        elif command -v dnf >/dev/null 2>&1; then
+            # Fedora
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+            sudo dnf install -y nodejs
+        else
+            print_error "Unsupported package manager. Please install Node.js manually."
+            exit 1
+        fi
+        
+        print_success "Node.js installed successfully."
+    else
+        NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
+        if [ "$NODE_VERSION" -lt 16 ]; then
+            print_warning "Node.js version 16+ is recommended. Current version: $(node -v)"
+            print_status "Updating Node.js..."
+            
+            if command -v apt-get >/dev/null 2>&1; then
+                curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+                sudo apt-get install -y nodejs
+            elif command -v yum >/dev/null 2>&1; then
+                curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+                sudo yum install -y nodejs
+            elif command -v dnf >/dev/null 2>&1; then
+                curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+                sudo dnf install -y nodejs
+            fi
+        fi
     fi
     
+    # Check and install npm
     if ! command -v npm >/dev/null 2>&1; then
-        print_error "npm is not available."
+        print_error "npm is not available. Please install npm manually."
         exit 1
     fi
     
+    # Check and install PM2
     if ! command -v pm2 >/dev/null 2>&1; then
-        print_status "Installing PM2..."
+        print_status "PM2 not found. Installing PM2..."
         npm install -g pm2
+        print_success "PM2 installed successfully."
     fi
     
-    print_success "System requirements check completed."
+    # Check and install MySQL client
+    if ! command -v mysql >/dev/null 2>&1; then
+        print_status "MySQL client not found. Installing MySQL client..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y mysql-client
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y mysql
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y mysql
+        else
+            print_warning "Could not install MySQL client automatically. Please install manually."
+        fi
+    fi
+    
+    # Check and install Redis client
+    if ! command -v redis-cli >/dev/null 2>&1; then
+        print_status "Redis client not found. Installing Redis client..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y redis-tools
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y redis
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y redis
+        else
+            print_warning "Could not install Redis client automatically. Please install manually."
+        fi
+    fi
+    
+    # Check and install Git
+    if ! command -v git >/dev/null 2>&1; then
+        print_status "Git not found. Installing Git..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y git
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y git
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y git
+        else
+            print_warning "Could not install Git automatically. Please install manually."
+        fi
+    fi
+    
+    # Check and install wget
+    if ! command -v wget >/dev/null 2>&1; then
+        print_status "wget not found. Installing wget..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y wget
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y wget
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y wget
+        else
+            print_warning "Could not install wget automatically. Please install manually."
+        fi
+    fi
+    
+    # Check and install curl
+    if ! command -v curl >/dev/null 2>&1; then
+        print_status "curl not found. Installing curl..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y curl
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y curl
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y curl
+        else
+            print_warning "Could not install curl automatically. Please install manually."
+        fi
+    fi
+    
+    # Check and install jq (for JSON parsing)
+    if ! command -v jq >/dev/null 2>&1; then
+        print_status "jq not found. Installing jq..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y jq
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y jq
+        else
+            print_warning "Could not install jq automatically. Please install manually."
+        fi
+    fi
+    
+    # Check and install unzip
+    if ! command -v unzip >/dev/null 2>&1; then
+        print_status "unzip not found. Installing unzip..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y unzip
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y unzip
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y unzip
+        else
+            print_warning "Could not install unzip automatically. Please install manually."
+        fi
+    fi
+    
+    # Check and install build tools (for native modules)
+    print_status "Installing build tools for native modules..."
+    
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y build-essential python3
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum groupinstall -y "Development Tools"
+        sudo yum install -y python3
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf groupinstall -y "Development Tools"
+        sudo dnf install -y python3
+    else
+        print_warning "Could not install build tools automatically. Please install manually."
+    fi
+    
+    # Verify installations
+    print_status "Verifying installations..."
+    
+    echo "Node.js: $(node -v)"
+    echo "npm: $(npm -v)"
+    echo "PM2: $(pm2 -v)"
+    echo "MySQL: $(mysql --version 2>/dev/null || echo 'Not available')"
+    echo "Redis: $(redis-cli --version 2>/dev/null || echo 'Not available')"
+    echo "Git: $(git --version 2>/dev/null || echo 'Not available')"
+    echo "wget: $(wget --version 2>/dev/null | head -1 || echo 'Not available')"
+    echo "curl: $(curl --version 2>/dev/null | head -1 || echo 'Not available')"
+    echo "jq: $(jq --version 2>/dev/null || echo 'Not available')"
+    echo "unzip: $(unzip -v 2>/dev/null | head -1 || echo 'Not available')"
+    
+    print_success "System requirements check and installation completed."
+}
+
+# Function to check and install additional dependencies
+install_additional_dependencies() {
+    print_status "Installing additional dependencies for gSpy..."
+    
+    # Install system libraries for image processing
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get install -y \
+            libpng-dev \
+            libjpeg-dev \
+            libgif-dev \
+            librsvg2-dev \
+            libwebp-dev \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libgif-dev \
+            libexif-dev \
+            libvips-dev \
+            libmagickwand-dev \
+            imagemagick
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y \
+            libpng-devel \
+            libjpeg-devel \
+            giflib-devel \
+            librsvg2-devel \
+            libwebp-devel \
+            freetype-devel \
+            fontconfig-devel \
+            cairo-devel \
+            pango-devel \
+            libexif-devel \
+            vips-devel \
+            ImageMagick-devel \
+            ImageMagick
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y \
+            libpng-devel \
+            libjpeg-devel \
+            giflib-devel \
+            librsvg2-devel \
+            libwebp-devel \
+            freetype-devel \
+            fontconfig-devel \
+            cairo-devel \
+            pango-devel \
+            libexif-devel \
+            vips-devel \
+            ImageMagick-devel \
+            ImageMagick
+    fi
+    
+    # Install additional system tools
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get install -y \
+            htop \
+            iotop \
+            nethogs \
+            iftop \
+            tree \
+            tmux \
+            screen \
+            vim \
+            nano \
+            mc \
+            rsync \
+            sshfs \
+            nfs-common \
+            samba-client
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y \
+            htop \
+            iotop \
+            nethogs \
+            iftop \
+            tree \
+            tmux \
+            screen \
+            vim \
+            nano \
+            mc \
+            rsync \
+            nfs-utils \
+            cifs-utils
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y \
+            htop \
+            iotop \
+            nethogs \
+            iftop \
+            tree \
+            tmux \
+            screen \
+            vim \
+            nano \
+            mc \
+            rsync \
+            nfs-utils \
+            cifs-utils
+    fi
+    
+    print_success "Additional dependencies installed successfully."
+}
+
+# Function to configure system settings
+configure_system_settings() {
+    print_status "Configuring system settings for optimal performance..."
+    
+    # Increase file descriptor limits
+    if [ -f /etc/security/limits.conf ]; then
+        print_status "Configuring file descriptor limits..."
+        echo "* soft nofile 65536" | sudo tee -a /etc/security/limits.conf
+        echo "* hard nofile 65536" | sudo tee -a /etc/security/limits.conf
+        echo "root soft nofile 65536" | sudo tee -a /etc/security/limits.conf
+        echo "root hard nofile 65536" | sudo tee -a /etc/security/limits.conf
+    fi
+    
+    # Configure kernel parameters
+    if [ -f /etc/sysctl.conf ]; then
+        print_status "Configuring kernel parameters..."
+        echo "net.core.somaxconn = 65535" | sudo tee -a /etc/sysctl.conf
+        echo "net.ipv4.tcp_max_syn_backlog = 65535" | sudo tee -a /etc/sysctl.conf
+        echo "net.core.netdev_max_backlog = 5000" | sudo tee -a /etc/sysctl.conf
+        echo "net.ipv4.tcp_fin_timeout = 30" | sudo tee -a /etc/sysctl.conf
+        echo "net.ipv4.tcp_keepalive_time = 1200" | sudo tee -a /etc/sysctl.conf
+        echo "net.ipv4.tcp_max_tw_buckets = 5000" | sudo tee -a /etc/sysctl.conf
+        echo "vm.swappiness = 10" | sudo tee -a /etc/sysctl.conf
+        echo "vm.dirty_ratio = 15" | sudo tee -a /etc/sysctl.conf
+        echo "vm.dirty_background_ratio = 5" | sudo tee -a /etc/sysctl.conf
+        
+        # Apply changes
+        sudo sysctl -p
+    fi
+    
+    # Configure Node.js settings
+    print_status "Configuring Node.js settings..."
+    
+    # Set Node.js memory limit
+    export NODE_OPTIONS="--max-old-space-size=4096"
+    
+    # Add to profile for persistence
+    if [ -f ~/.bashrc ]; then
+        echo 'export NODE_OPTIONS="--max-old-space-size=4096"' >> ~/.bashrc
+    fi
+    
+    if [ -f ~/.profile ]; then
+        echo 'export NODE_OPTIONS="--max-old-space-size=4096"' >> ~/.profile
+    fi
+    
+    # Configure npm settings
+    npm config set registry https://registry.npmjs.org/
+    npm config set cache ~/.npm-cache
+    npm config set prefix ~/.npm-global
+    
+    # Create npm global directory
+    mkdir -p ~/.npm-global
+    echo 'export PATH=~/.npm-global/bin:$PATH' >> ~/.bashrc
+    
+    print_success "System settings configured successfully."
+}
+
+# Function to update system and install security patches
+update_system() {
+    print_status "Updating system and installing security patches..."
+    
+    # Update package lists
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update
+        sudo apt-get upgrade -y
+        sudo apt-get autoremove -y
+        sudo apt-get autoclean
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum update -y
+        sudo yum autoremove -y
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf update -y
+        sudo dnf autoremove -y
+    fi
+    
+    # Install security updates
+    if command -v unattended-upgrades >/dev/null 2>&1; then
+        print_status "Configuring automatic security updates..."
+        sudo apt-get install -y unattended-upgrades
+        sudo dpkg-reconfigure -plow unattended-upgrades
+    fi
+    
+    # Configure firewall (if available)
+    if command -v ufw >/dev/null 2>&1; then
+        print_status "Configuring firewall..."
+        sudo ufw --force enable
+        sudo ufw default deny incoming
+        sudo ufw default allow outgoing
+        sudo ufw allow ssh
+        sudo ufw allow 80/tcp
+        sudo ufw allow 443/tcp
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        print_status "Configuring firewall..."
+        sudo firewall-cmd --permanent --add-service=ssh
+        sudo firewall-cmd --permanent --add-service=http
+        sudo firewall-cmd --permanent --add-service=https
+        sudo firewall-cmd --reload
+    fi
+    
+    print_success "System updated and secured successfully."
 }
 
 get_configuration() {
@@ -675,14 +1118,57 @@ main() {
     echo "=========================================="
     echo ""
     
+    # Check Cloudways environment
+    check_cloudways_environment
+    
+    # Check if running as root or with sudo
+    if [ "$EUID" -eq 0 ]; then
+        print_warning "Running as root. Some operations may not work correctly."
+    fi
+    
+    # Check and install system requirements
     check_requirements
+    
+    # Update system and install security patches
+    update_system
+    
+    # Install additional dependencies
+    install_additional_dependencies
+    
+    # Configure system settings
+    configure_system_settings
+    
+    # Get user configuration
     get_configuration
+    
+    # Create deployment directory
     create_deployment_directory
+    
+    # Setup gSpy application
     setup_gspy
+    
+    # Setup database
     setup_database
+    
+    # Create PM2 configuration
     create_pm2_config
+    
+    # Create management scripts
     create_management_scripts
+    
+    # Display final information
     display_final_info
+    
+    # Final system check
+    print_status "Performing final system check..."
+    echo "System load: $(uptime)"
+    echo "Memory usage: $(free -h | grep Mem)"
+    echo "Disk usage: $(df -h / | tail -1)"
+    echo "Node.js version: $(node -v)"
+    echo "npm version: $(npm -v)"
+    echo "PM2 version: $(pm2 -v)"
+    
+    print_success "gSpy deployment completed successfully!"
 }
 
 main "$@" 
